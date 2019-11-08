@@ -14,8 +14,6 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.UserGroupInformation;
 
 import org.apache.spark.SparkContext;
-import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 
 import org.slf4j.Logger;
@@ -27,7 +25,7 @@ public class Entry
 	private static final Logger log = LoggerFactory.getLogger(Entry.class);
 	
 	private static String graphPropertiesFilePath = null;
-	private static int txCommitInterval = 0;
+	private static int txCommitInterval = 1000;
 	private static String elementLabel = null;
 	private static String srcPath = null;
 	private static List<String> indexColumns = new ArrayList<String>();
@@ -35,12 +33,18 @@ public class Entry
 	private static Boolean initMode = false;
 	private static Boolean vertexMode = false;
 	
+    private static String primaryKeyColumn = null;
+    private static String primaryKeyMapSaveLocation;
+    
+	
 	private static String edgeKeyA = null;
 	private static String edgeKeyB = null;
 	private static String vertexLabelA = null;
 	private static String vertexLabelB = null;
 	private static String vertexKeyA = null;
 	private static String vertexKeyB = null;
+	private static String vertexAPrimaryKeyMapLoadLocation = null;
+	private static String vertexBPrimaryKeyMapLoadLocation = null;
 	
     private static boolean Load_Agrs(String[] args, SparkContext sc)
     {
@@ -56,6 +60,9 @@ public class Entry
         options.addOption("java_security_auth_login_config", true, "Path to jaas.conf file");
         
         options.addOption("mode", true, "initVertex, Vertex, initEdge, or Edge");
+        
+        options.addOption("primaryKeyColumn", true, "Name of column to track key pk to vertex id mappings");
+        options.addOption("primaryKeyMapSaveLocation", true, "Path to save pk to vertex id mappings");
 
         options.addOption("edgeKeyA", true, "The property name from edge a to use when searching for vertex a");
         options.addOption("edgeKeyB", true, "The property name from edge b to use when searching for vertex b");
@@ -63,6 +70,9 @@ public class Entry
         options.addOption("vertexLabelB", true, "The vertex label for vertex b. Used when matching edgeKeyB to vertexKeyB");
         options.addOption("vertexKeyA", true, "The property name from vertex a to use when searching for vertex a");
         options.addOption("vertexKeyB", true, "The property name from vertex b to use when searching for vertex b");
+        
+        options.addOption("vertexAPrimaryKeyMapLoadLocation", true, "PK to graph id map for vertex A");
+        options.addOption("vertexBPrimaryKeyMapLoadLocation", true, "PK to graph id map for vertex B");
     
         CommandLineParser parser = new PosixParser();
         try
@@ -104,12 +114,6 @@ public class Entry
                     return false;
             	}
             }
-            else
-            {
-            	log.error("Missing commandline params: txCommitInterval required");
-            	formatter.printHelp(AppName, options);
-                return false;
-            }
             
             if(cmd.hasOption("elementLabel")) { elementLabel = cmd.getOptionValue("elementLabel"); }
             else
@@ -142,7 +146,26 @@ public class Entry
             
             if(cmd.hasOption("mode"))
             {
-            	if(cmd.getOptionValue("mode").equals("Vertex")){ vertexMode = true; }
+            	if(cmd.getOptionValue("mode").equals("Vertex"))
+            	{
+            	    vertexMode = true;
+            	    
+            	    if(cmd.hasOption("primaryKeyColumn")) { primaryKeyColumn = cmd.getOptionValue("primaryKeyColumn"); }
+                    else
+                    {
+                    	log.error("Missing commandline params: primaryKeyColumn required when running in vertex mode");
+                    	formatter.printHelp(AppName, options);
+                        return false;
+                    }
+            	    
+            	    if(cmd.hasOption("primaryKeyMapSaveLocation")) { primaryKeyMapSaveLocation = cmd.getOptionValue("primaryKeyMapSaveLocation"); }
+                    else
+                    {
+                    	log.error("Missing commandline params: primaryKeyMapSaveLocation required when running in edge mode");
+                    	formatter.printHelp(AppName, options);
+                        return false;
+                    }
+            	}
             	else if(cmd.getOptionValue("mode").equals("initVertex"))
             	{ 
             		initMode = true;
@@ -198,12 +221,28 @@ public class Entry
                     	log.error("Missing commandline params: vertexKeyB required when running in edge mode");
                     	formatter.printHelp(AppName, options);
                         return false;
-                    } 		
+                    }
+                    
+                    if(cmd.hasOption("vertexAPrimaryKeyMapLoadLocation")) { vertexAPrimaryKeyMapLoadLocation = cmd.getOptionValue("vertexAPrimaryKeyMapLoadLocation"); }
+                    else
+                    {
+                    	log.error("Missing commandline params: vertexAPrimaryKeyMapLoadLocation required when running in edge mode");
+                    	formatter.printHelp(AppName, options);
+                        return false;
+                    }
+                    
+                    if(cmd.hasOption("vertexBPrimaryKeyMapLoadLocation")) { vertexBPrimaryKeyMapLoadLocation = cmd.getOptionValue("vertexBPrimaryKeyMapLoadLocation"); }
+                    else
+                    {
+                    	log.error("Missing commandline params: vertexBPrimaryKeyMapLoadLocation required when running in edge mode");
+                    	formatter.printHelp(AppName, options);
+                        return false;
+                    }              
             	}
             	else if(cmd.getOptionValue("mode").equals("initEdge")) { initMode = true; }
             	else
             	{
-            		log.error("Bad commandline params: mode must be etiher Vertex or Edge");
+            		log.error("Bad commandline params: mode must be etiher initVertex, Vertex, initEdge, or Edge");
                 	formatter.printHelp(AppName, options);
                     return false;
             	}
@@ -250,7 +289,7 @@ public class Entry
             	}
             	else
             	{
-            		if(!graphBuilder.loadVerticiesFromOrc(elementLabel, srcPath)) { System.exit(-1); } 
+            		if(!graphBuilder.loadVerticiesFromOrc(elementLabel, srcPath, primaryKeyColumn, primaryKeyMapSaveLocation)) { System.exit(-1); } 
             	}
             }
             else
@@ -261,9 +300,11 @@ public class Entry
             	}
             	else
             	{
-            		if(!graphBuilder.loadEdgesFromOrc(elementLabel, srcPath, edgeKeyA, edgeKeyB, vertexLabelA, vertexLabelB, vertexKeyA, vertexKeyB)) { System.exit(-1); }
+            		if(!graphBuilder.loadEdgesFromOrc(elementLabel, srcPath, edgeKeyA, edgeKeyB, vertexLabelA, vertexLabelB, vertexKeyA, vertexKeyB, vertexAPrimaryKeyMapLoadLocation, vertexBPrimaryKeyMapLoadLocation)) { System.exit(-1); }
             	}
             }
+            
+            graphBuilder.closeGraph();
         }
         else { System.exit(-1); }
         

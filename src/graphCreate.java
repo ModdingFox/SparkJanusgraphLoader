@@ -1,14 +1,19 @@
 import java.sql.Date;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.concurrent.ExecutionException;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.concurrent.ExecutionException;
 
 import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.expressions.Window;
-import org.apache.spark.sql.expressions.WindowSpec;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructType;
+
 import org.apache.tinkerpop.gremlin.process.traversal.dsl.graph.GraphTraversalSource;
 import org.apache.tinkerpop.gremlin.structure.Edge;
 import org.apache.tinkerpop.gremlin.structure.T;
@@ -19,6 +24,8 @@ import org.janusgraph.core.JanusGraphFactory;
 import org.janusgraph.core.JanusGraphTransaction;
 import org.janusgraph.core.JanusGraphVertex;
 import org.janusgraph.core.PropertyKey;
+import org.janusgraph.core.VertexLabel;
+import org.janusgraph.core.schema.JanusGraphManagement.IndexBuilder;
 import org.janusgraph.core.schema.Mapping;
 import org.janusgraph.core.schema.SchemaAction;
 import org.janusgraph.graphdb.database.StandardJanusGraph;
@@ -40,7 +47,8 @@ public class graphCreate
     SparkSession spark = null;
     int txCommitInterval = 0;
     
-    private Class convertTypesFromSparkToJanusgraph(String sparkType)
+    @SuppressWarnings("rawtypes")
+	private Class convertTypesFromSparkToJanusgraph(String sparkType)
     {
     	switch (sparkType)
     	{
@@ -65,6 +73,31 @@ public class graphCreate
     	}
     }
     
+    private DataType convertStringToSparkType(String sparkType)
+    {
+    	switch (sparkType)
+    	{
+    		case "ByteType":
+    			return DataTypes.ByteType;
+    		case "ShortType":
+    			return DataTypes.ShortType;
+    		case "IntegerType":
+    			return DataTypes.IntegerType;
+    		case "LongType":
+    			return DataTypes.LongType;
+    		case "FloatType":
+    			return DataTypes.FloatType;
+    		case "DoubleType":
+    			return DataTypes.DoubleType;
+    		case "StringType":
+    			return DataTypes.StringType;
+    		case "BooleanType":
+    			return DataTypes.BooleanType;
+    		default:
+    			return null;
+    	}
+    }
+    
     private Object getColumnData(List<Tuple2<String, String>> srcDataColumns, int column, Row currentRow)
     {
     	if(currentRow.get(column) == null) { log.debug("Skipping column with null value " + srcDataColumns.get(column)._1); return null; }
@@ -81,26 +114,54 @@ public class graphCreate
         else { log.info("Skipping column " + srcDataColumns.get(column)._1 + " with data type " + srcDataColumns.get(column)._2); return null; }	
     }
     
-    private Boolean createVertexPropertyIndex(String propertyName, String indexPrefix)
+    private void stopAllCurrentMGMTTx()
     {
-    	log.info("Attempting vertex index create: " + propertyName);
+        ManagementSystem mgmt = (ManagementSystem)graph.openManagement();
+        
+        graph.getOpenTransactions().forEach(tx -> tx.rollback());
+        
+        mgmt = (ManagementSystem)graph.openManagement();
+
+        for(String it : mgmt.getOpenInstances())
+        {
+        	if(!it.endsWith("(current)")) { mgmt.forceCloseInstance(it); }
+        }
+        
+        mgmt.commit();
+    }
+    
+    private Boolean createVertexPropertyMixedIndex(String indexPrefix, String vertexLabel, List<String> indexColumns)
+    {
+    	String indexName = indexPrefix + "_Vertex_" + vertexLabel;
+    	
+    	log.info("Attempting vertex index create: " + indexName);
         graph.tx().rollback();
         
+        stopAllCurrentMGMTTx();
+        
         ManagementSystem mgmt = (ManagementSystem)graph.openManagement();
-        PropertyKeyVertex propertyKey = (PropertyKeyVertex)mgmt.getPropertyKey(propertyName);
         
-        String indexName = indexPrefix + "_Vertex_" + propertyName;
-
         if(mgmt.getGraphIndex(indexName) == null)
-        {
-            log.info("Creating vertex index: " + propertyName);
-
-            if (propertyKey.dataType() == String.class) { mgmt.buildIndex(indexName, Vertex.class).addKey(propertyKey, Mapping.TEXT.asParameter()).buildMixedIndex("search"); }
-            else { mgmt.buildIndex(indexName, Vertex.class).addKey(propertyKey).buildMixedIndex("search"); }
-        
+        { 
+        	VertexLabel selectVertex = mgmt.getVertexLabel(vertexLabel);
+            
+            IndexBuilder newIndex = mgmt.buildIndex(indexName, Vertex.class).indexOnly(selectVertex);
+            
+            for(String indexColumn : indexColumns)
+            {
+            	log.info("Adding property to index: " + indexColumn);
+            	PropertyKeyVertex propertyKey = (PropertyKeyVertex)mgmt.getPropertyKey(indexColumn);
+            	if (propertyKey.dataType() == String.class) { newIndex = newIndex.addKey(propertyKey, Mapping.TEXT.asParameter()); }
+                else { newIndex = newIndex.addKey(propertyKey); }
+            }
+            
+            newIndex.buildMixedIndex("search");
+            
             mgmt.commit();
             graph.tx().rollback();
-        
+            
+            stopAllCurrentMGMTTx();
+            
             try
             {
                 mgmt.awaitGraphIndexStatus(graph, indexName).call();
@@ -110,36 +171,42 @@ public class graphCreate
             } 
             catch (InterruptedException e)
             {
-	        log.error("Failed to create vertex index: InterruptedException - " + indexName, e);
+            	log.error("Failed to create vertex index: InterruptedException - " + indexName, e);
                 return false;
     	    }
             catch (ExecutionException e)
             {
                 log.error("Failed to create vertex index: ExecutionException - " + indexName, e);
                 return false;
-	    }
-        
-            log.info("Created vertex index: " + propertyName);
+            }
         }
-        else { log.info("Vertex index already exists: " + propertyName); }
-
+        else { log.info("Vertex index already exists: " + indexPrefix); }
+        
         return true;
+        
     }
-
-    private void createGraphProperty(String propertyName, Class propertyClass, Cardinality propertyCardinality)
+    
+    @SuppressWarnings("rawtypes")
+	private void createGraphProperty(String propertyName, Class propertyClass, Cardinality propertyCardinality)
     {
-    	log.info("Checking for PropertyKey: " + propertyName);
+    	log.info("Checking for PropertyKey: " + propertyName + " Type: " + propertyClass.getName());
     	
         ManagementSystem mgmt = (ManagementSystem)graph.openManagement();
         
-    	if(mgmt.getPropertyKey(propertyName) == null)
+        PropertyKey graphProperty = mgmt.getPropertyKey(propertyName);
+        
+    	if(graphProperty == null)
     	{
         	log.info("Creating PropertyKey: " + propertyName);  
             mgmt.makePropertyKey(propertyName).dataType(propertyClass).cardinality(propertyCardinality).make();
             mgmt.commit();
             log.info("Created PropertyKey: " + propertyName);	
     	}
-    	else { log.info("PropertyKey already exists: " + propertyName); }
+    	else
+    	{ 
+    		if(graphProperty.dataType() == propertyClass) { log.info("PropertyKey already exists: " + propertyName); }
+    		else { log.error("PropertyKey data type conflict: " + propertyName + " Found: " + graphProperty.dataType()); }
+    	}
     }
     
     private void createVertex(String vertexName)
@@ -165,20 +232,18 @@ public class graphCreate
     	
     	String graphStoreManagerName = graph.getBackend().getStoreManager().getName();
     	
-    	for(Tuple2<String, String> srcDataColumn : srcDataColumns)
-    	{
-            createGraphProperty(srcDataColumn._1, convertTypesFromSparkToJanusgraph(srcDataColumn._2), Cardinality.SINGLE);
-            if(indexColumns.contains(srcDataColumn._1)) { createVertexPropertyIndex(srcDataColumn._1, graphStoreManagerName); }
-    	}
+    	for(Tuple2<String, String> srcDataColumn : srcDataColumns) { createGraphProperty(srcDataColumn._1, convertTypesFromSparkToJanusgraph(srcDataColumn._2), Cardinality.SINGLE); }
+    	
+        if(indexColumns.size() > 0) { createVertexPropertyMixedIndex(graphStoreManagerName, vertexLabel, indexColumns); }
     	
     	return true;
     }
         
-    public boolean loadVerticiesFromOrc(String vertexLabel, String srcPath)
+    public boolean loadVerticiesFromOrc(String vertexLabel, String srcPath, String primaryKeyColumn, String primaryKeyMapSaveLocation)
     {	
     	Dataset<Row> srcData = spark.read().orc(srcPath);
     	List<Tuple2<String, String>> srcDataColumns = Arrays.asList(srcData.dtypes());
-
+    	
     	JanusGraphTransaction tx = graph.newTransaction();
     	int txCounter = 0;
         int txCount = 0;
@@ -188,13 +253,20 @@ public class graphCreate
         srcData = srcData.repartition(Math.toIntExact(partitionCount));
         
         Iterator<Row> rowIterator = srcData.toLocalIterator();
+
+        DataType primaryKeyDataType = convertStringToSparkType(srcDataColumns.get(srcData.schema().fieldIndex(primaryKeyColumn))._2);
+        List<Row> primaryKeyMap = new ArrayList<Row>();
+        List<org.apache.spark.sql.types.StructField> primaryKeyMapStructField=new ArrayList<org.apache.spark.sql.types.StructField>();
+        primaryKeyMapStructField.add(DataTypes.createStructField(primaryKeyColumn, primaryKeyDataType, true));
+        primaryKeyMapStructField.add(DataTypes.createStructField("vertexID", DataTypes.LongType, true));
+        StructType primaryKeyStructType = DataTypes.createStructType(primaryKeyMapStructField);
         
     	while(rowIterator.hasNext())
     	{
     		Row currentRow = rowIterator.next();
     		
     		JanusGraphVertex newVertex = tx.addVertex(T.label, vertexLabel);
-    		
+   		
     		for(int column = 0; column < srcDataColumns.size(); column++)
     		{
     			Object newPropertyValue = getColumnData(srcDataColumns, column, currentRow);
@@ -202,12 +274,14 @@ public class graphCreate
     			{
     				newVertex.property(srcDataColumns.get(column)._1, newPropertyValue);
     			}
+    			
+    			if(srcDataColumns.get(column)._1.equals(primaryKeyColumn)) { primaryKeyMap.add(RowFactory.create(newPropertyValue, newVertex.longId())); }
     		}
-    		
+
     		txCounter = txCounter + 1;
     		
             if(txCounter > txCommitInterval)
-            {
+            {      
             	txCounter = 0;
                 txCount = txCount + 1;
                 tx.commit();
@@ -220,10 +294,12 @@ public class graphCreate
     	if(tx.isOpen())
     	{
             txCount = txCount + 1;
-    	    tx.commit();
+            tx.commit();
             tx.close();	
             log.info(vertexLabel + ": Vertex Commit #" + txCount);
     	}
+    	
+    	spark.createDataFrame(primaryKeyMap, primaryKeyStructType).write().format("orc").mode(org.apache.spark.sql.SaveMode.Overwrite).orc(primaryKeyMapSaveLocation);
     	
     	return true;
     }
@@ -254,32 +330,14 @@ public class graphCreate
     	return true;
     }
     
-    public boolean loadEdgesFromOrc(String edgeLabel, String srcPath, String edgeKeyA, String edgeKeyB, String vertexLabelA, String vertexLabelB, String vertexKeyA, String vertexKeyB)
+    public boolean loadEdgesFromOrc(String edgeLabel, String srcPath, String edgeKeyA, String edgeKeyB, String vertexLabelA, String vertexLabelB, String vertexKeyA, String vertexKeyB, String vertexAPrimaryKeyMapLoadLocation, String vertexBPrimaryKeyMapLoadLocation)
     {
     	Dataset<Row> srcData = spark.read().orc(srcPath);
     	List<Tuple2<String, String>> srcDataColumns = Arrays.asList(srcData.dtypes());
     	
-    	int edgeKeyAColumnId = -1;
-    	int edgeKeyBColumnId = -1;
-    	
-    	for(Tuple2<String, String> srcDataColumn : srcDataColumns)
-    	{
-            if(srcDataColumn._1.equals(edgeKeyA)) { edgeKeyAColumnId = srcDataColumns.indexOf(srcDataColumn); }
-            if(srcDataColumn._1.equals(edgeKeyB)) { edgeKeyBColumnId = srcDataColumns.indexOf(srcDataColumn); }
-    	}
-    	
-    	if(edgeKeyAColumnId == -1)
-    	{
-    		log.error("Could not find edgeKeyA in src data");
-    		return false;
-    	}
-    	
-    	if(edgeKeyBColumnId == -1)
-    	{
-    		log.error("Could not find edgeKeyB in src data");
-    		return false;
-    	}
-    	
+    	int edgeKeyAColumnId = srcData.schema().fieldIndex(edgeKeyA);
+    	int edgeKeyBColumnId = srcData.schema().fieldIndex(edgeKeyB);
+    	    	    	
     	JanusGraphTransaction tx = graph.newTransaction();
     	GraphTraversalSource g = graph.traversal();
     	int txCounter = 0;
@@ -315,8 +373,39 @@ public class graphCreate
         	return false;
         }
         
-    	for(Row currentRow : srcData.collectAsList())
+        long partitionCount = srcData.count()/txCommitInterval;
+        
+        srcData = srcData.repartition(Math.toIntExact(partitionCount));
+        
+        Iterator<Row> rowIterator = srcData.toLocalIterator();
+        
+        HashMap<Object, Long> vertexKeyMapA = new HashMap<Object, Long>();
+        HashMap<Object, Long> vertexKeyMapB = new HashMap<Object, Long>();
+        
+        Dataset<Row> srcDataVertexAPrimaryKeyMap = spark.read().orc(vertexAPrimaryKeyMapLoadLocation);
+        List<Tuple2<String, String>> srcDataVertexAPrimaryKeyMapColumns = Arrays.asList(srcDataVertexAPrimaryKeyMap.dtypes());
+        Iterator<Row> srcDataVertexAPrimaryKeyMapIterator = srcDataVertexAPrimaryKeyMap.toLocalIterator();
+        
+        while(srcDataVertexAPrimaryKeyMapIterator.hasNext())
     	{
+    		Row currentRow = srcDataVertexAPrimaryKeyMapIterator.next();
+    		vertexKeyMapA.put(getColumnData(srcDataVertexAPrimaryKeyMapColumns, 0, currentRow), currentRow.getLong(1));
+    	}
+        
+        Dataset<Row> srcDataVertexBPrimaryKeyMap = spark.read().orc(vertexBPrimaryKeyMapLoadLocation);
+        List<Tuple2<String, String>> srcDataVertexBPrimaryKeyMapColumns = Arrays.asList(srcDataVertexBPrimaryKeyMap.dtypes());
+        Iterator<Row> srcDataVertexBPrimaryKeyMapIterator = srcDataVertexBPrimaryKeyMap.toLocalIterator();
+        
+        while(srcDataVertexBPrimaryKeyMapIterator.hasNext())
+    	{
+    		Row currentRow = srcDataVertexBPrimaryKeyMapIterator.next();
+    		vertexKeyMapB.put(getColumnData(srcDataVertexBPrimaryKeyMapColumns, 0, currentRow), currentRow.getLong(1));
+    	}
+        
+    	while(rowIterator.hasNext())
+    	{
+    		Row currentRow = rowIterator.next();
+    	    
     		Object edgeKeyAPropertyValue = getColumnData(srcDataColumns, edgeKeyAColumnId, currentRow);
     		Object edgeKeyBPropertyValue = getColumnData(srcDataColumns, edgeKeyBColumnId, currentRow);
     		
@@ -325,25 +414,36 @@ public class graphCreate
 				Vertex vertexA = null;
 				Vertex vertexB = null;
 				
-				if(edgeKeyAPropertyValue instanceof java.lang.String) { vertexA = g.V().has(vertexKeyA, org.janusgraph.core.attribute.Text.textContains(edgeKeyAPropertyValue)).has(T.label, vertexLabelA).next(); }
-				else { vertexA = g.V().has(vertexKeyA, edgeKeyAPropertyValue).has(T.label, vertexLabelA).next(); }
+				if(vertexKeyMapA.containsKey(edgeKeyAPropertyValue)) { vertexA = g.V(vertexKeyMapA.get(edgeKeyAPropertyValue)).next(); }
+				else
+				{
+					if(edgeKeyAPropertyValue instanceof java.lang.String) { vertexA = g.V().has(vertexKeyA, org.janusgraph.core.attribute.Text.textContains(edgeKeyAPropertyValue)).has(T.label, vertexLabelA).next(); }
+					else { vertexA = g.V().has(vertexKeyA, edgeKeyAPropertyValue).has(T.label, vertexLabelA).next(); }
+				}
 				
-				
-	    		if(edgeKeyBPropertyValue instanceof java.lang.String) { vertexB = g.V().has(vertexKeyB, org.janusgraph.core.attribute.Text.textContains(edgeKeyBPropertyValue)).has(T.label, vertexLabelB).next(); }
-	    		else { vertexB = g.V().has(vertexKeyB, edgeKeyBPropertyValue).has(T.label, vertexLabelB).next(); } 
+				if(vertexKeyMapB.containsKey(edgeKeyBPropertyValue)) { vertexB = g.V(vertexKeyMapB.get(edgeKeyBPropertyValue)).next(); }
+				else
+				{
+					if(edgeKeyBPropertyValue instanceof java.lang.String) { vertexB = g.V().has(vertexKeyB, org.janusgraph.core.attribute.Text.textContains(edgeKeyBPropertyValue)).has(T.label, vertexLabelB).next(); }
+		    		else { vertexB = g.V().has(vertexKeyB, edgeKeyBPropertyValue).has(T.label, vertexLabelB).next(); } 
+				}
 	    		
-	    		Edge newEdge = vertexA.addEdge(edgeLabel, vertexB);
-	    		
-	    		for(int column = 0; column < srcDataColumns.size(); column++)
-	    		{
-	    			Object newPropertyValue = getColumnData(srcDataColumns, column, currentRow);
-	    			if(newPropertyValue != null)
-	    			{
-	    				newEdge.property(srcDataColumns.get(column)._1, newPropertyValue);
-	    			}
-	    		}
-	    		
-	    		txCounter = txCounter + 1;
+				if(vertexA != null && vertexB != null)
+				{
+		    		Edge newEdge = vertexA.addEdge(edgeLabel, vertexB);
+		    		
+		    		for(int column = 0; column < srcDataColumns.size(); column++)
+		    		{
+		    			Object newPropertyValue = getColumnData(srcDataColumns, column, currentRow);
+		    			if(newPropertyValue != null)
+		    			{
+		    				newEdge.property(srcDataColumns.get(column)._1, newPropertyValue);
+		    			}
+		    		}
+		    		
+		    		txCounter = txCounter + 1;
+				}
+				else { log.error("Could not find verticies for edge"); }
 	    		
 	            if(txCounter > txCommitInterval)
 	            {
@@ -374,5 +474,6 @@ public class graphCreate
         spark = sparkIn;
         txCommitInterval = txCommitIntervalIn;
     }
-	
+    
+    public void closeGraph() { graph.close(); } 
 }
