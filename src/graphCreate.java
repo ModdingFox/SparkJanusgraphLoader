@@ -249,6 +249,7 @@ public class graphCreate
         int txCount = 0;
         
         long partitionCount = srcData.count()/txCommitInterval;
+        if(partitionCount < 1) { partitionCount = 1; }
         
         srcData = srcData.repartition(Math.toIntExact(partitionCount));
         
@@ -374,6 +375,7 @@ public class graphCreate
         }
         
         long partitionCount = srcData.count()/txCommitInterval;
+        if(partitionCount < 1) { partitionCount = 1; }
         
         srcData = srcData.repartition(Math.toIntExact(partitionCount));
         
