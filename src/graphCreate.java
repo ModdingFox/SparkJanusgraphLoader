@@ -46,6 +46,7 @@ public class graphCreate
     StandardJanusGraph graph = null;
     SparkSession spark = null;
     int txCommitInterval = 0;
+    int graphTxCommitInterval = 0;
     
     @SuppressWarnings("rawtypes")
 	private Class convertTypesFromSparkToJanusgraph(String sparkType)
@@ -248,10 +249,8 @@ public class graphCreate
     	int txCounter = 0;
         int txCount = 0;
         
-        long partitionCount = srcData.count()/txCommitInterval;
-        if(partitionCount < 1) { partitionCount = 1; }
-        
-        srcData = srcData.repartition(Math.toIntExact(partitionCount));
+        int graphTxCounter = 0;
+        int graphTxCount = 0;
         
         Iterator<Row> rowIterator = srcData.toLocalIterator();
 
@@ -281,14 +280,25 @@ public class graphCreate
 
     		txCounter = txCounter + 1;
     		
-            if(txCounter > txCommitInterval)
+            if(txCounter >= txCommitInterval)
             {      
             	txCounter = 0;
                 txCount = txCount + 1;
                 tx.commit();
                 tx.close();
+                log.info(vertexLabel + ": Vertex Tx Commit #" + txCount);
+                
                 tx = graph.newTransaction();
-                log.info(vertexLabel + ": Vertex Commit #" + txCount);
+                
+                graphTxCounter = graphTxCounter + 1;
+                
+                if(graphTxCounter >= graphTxCommitInterval)
+                {
+                	graphTxCounter = 0;
+                	graphTxCount = graphTxCount + 1;
+                	graph.tx().commit();
+                	log.info(vertexLabel + ": Vertex Graph Tx Commit #" + graphTxCount);
+                }      
             }
     	}
     	
@@ -297,7 +307,12 @@ public class graphCreate
             txCount = txCount + 1;
             tx.commit();
             tx.close();	
-            log.info(vertexLabel + ": Vertex Commit #" + txCount);
+            
+            graphTxCount = graphTxCount + 1;
+            graph.tx().commit();
+            
+            log.info(vertexLabel + ": Vertex Tx Commit #" + txCount);
+            log.info(vertexLabel + ": Vertex Graph Tx Commit #" + graphTxCount);
     	}
     	
     	spark.createDataFrame(primaryKeyMap, primaryKeyStructType).write().format("orc").mode(org.apache.spark.sql.SaveMode.Overwrite).orc(primaryKeyMapSaveLocation);
@@ -344,6 +359,9 @@ public class graphCreate
     	int txCounter = 0;
         int txCount = 0;
         
+        int graphTxCounter = 0;
+        int graphTxCount = 0;
+        
         PropertyKey vertexKeyAPropertyKey = graph.getPropertyKey(vertexKeyA);
         PropertyKey edgeKeyAPropertyKey = graph.getPropertyKey(edgeKeyA);
         
@@ -373,11 +391,6 @@ public class graphCreate
         	log.error("Vertex label " + vertexLabelB + " does not exist");
         	return false;
         }
-        
-        long partitionCount = srcData.count()/txCommitInterval;
-        if(partitionCount < 1) { partitionCount = 1; }
-        
-        srcData = srcData.repartition(Math.toIntExact(partitionCount));
         
         Iterator<Row> rowIterator = srcData.toLocalIterator();
         
@@ -447,14 +460,25 @@ public class graphCreate
 				}
 				else { log.error("Could not find verticies for edge"); }
 	    		
-	            if(txCounter > txCommitInterval)
+	            if(txCounter >= txCommitInterval)
 	            {
 	            	txCounter = 0;
 	                txCount = txCount + 1;
 	                tx.commit();
 	                tx.close();
+	                log.info(edgeLabel + ": Edge Tx Commit #" + txCount);
+	                
 	                tx = graph.newTransaction();
-	                log.info(edgeLabel + ": Edge Commit #" + txCount);
+	                
+	                graphTxCounter = graphTxCounter + 1;
+	                
+	                if(graphTxCounter >= graphTxCommitInterval)
+	                {
+	                	graphTxCounter = 0;
+	                	graphTxCount = graphTxCount + 1;
+	                	graph.tx().commit();
+	                	log.info(edgeLabel + ": Edge Graph Tx Commit #" + graphTxCount);
+	                } 
 	            }
 			}
     	}
@@ -462,19 +486,25 @@ public class graphCreate
     	if(tx.isOpen())
     	{
             txCount = txCount + 1;
-    	    tx.commit();
+            tx.commit();
             tx.close();	
-            log.info(edgeLabel + ": Edge Commit #" + txCount);
+            
+            graphTxCount = graphTxCount + 1;
+            graph.tx().commit();
+            
+            log.info(edgeLabel + ": Edge Tx Commit #" + txCount);
+            log.info(edgeLabel + ": Edge Graph Tx Commit #" + graphTxCount);
     	}
     	
     	return true;
     }
     
-    public graphCreate(String graphPropertiesFileLocation, SparkSession sparkIn, int txCommitIntervalIn)
+    public graphCreate(String graphPropertiesFileLocation, SparkSession sparkIn, int txCommitIntervalIn, int graphTxCommitIntervalIn)
     {
         graph = (StandardJanusGraph)JanusGraphFactory.open(graphPropertiesFileLocation);
         spark = sparkIn;
         txCommitInterval = txCommitIntervalIn;
+        graphTxCommitInterval = graphTxCommitIntervalIn;
     }
     
     public void closeGraph() { graph.close(); } 

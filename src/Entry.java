@@ -26,6 +26,7 @@ public class Entry
 	
 	private static String graphPropertiesFilePath = null;
 	private static int txCommitInterval = 1000;
+	private static int graphTxCommitInterval = 1;
 	private static String elementLabel = null;
 	private static String srcPath = null;
 	private static List<String> indexColumns = new ArrayList<String>();
@@ -54,6 +55,7 @@ public class Entry
 
         options.addOption("graphPropertiesFilePath", true, "Path to a graph properties file");
         options.addOption("txCommitInterval", true, "The number of records to commit in each transaction");
+        options.addOption("graphTxCommitInterval", true, "The number of transactions to wait until committing to the graph");
         options.addOption("elementLabel", true, "This is the graph element vertex/edge label");
         options.addOption("srcPath", true, "Path to data on hdfs");
         options.addOption("indexColumns", true, "A comma seperated column list to define what properties need indices created");
@@ -110,6 +112,27 @@ public class Entry
             	catch(NumberFormatException e)
             	{
             		log.error("Bad commandline params: txCommitInterval must be a number", e);
+                	formatter.printHelp(AppName, options);
+                    return false;
+            	}
+            }
+            
+            if(cmd.hasOption("graphTxCommitInterval"))
+            { 
+            	try
+            	{ 
+            		graphTxCommitInterval = Integer.parseInt(cmd.getOptionValue("graphTxCommitInterval"));
+            		
+            		if(graphTxCommitInterval <= 0)
+            		{
+            			log.error("Bad commandline params: graphTxCommitInterval must be a positive number greater than 0");
+                    	formatter.printHelp(AppName, options);
+                        return false;
+            		}
+            	}
+            	catch(NumberFormatException e)
+            	{
+            		log.error("Bad commandline params: graphTxCommitInterval must be a number", e);
                 	formatter.printHelp(AppName, options);
                     return false;
             	}
@@ -279,7 +302,7 @@ public class Entry
                 throw new SecurityException(Message);
             }
             
-            graphCreate graphBuilder = new graphCreate(graphPropertiesFilePath, spark, txCommitInterval);
+            graphCreate graphBuilder = new graphCreate(graphPropertiesFilePath, spark, txCommitInterval, graphTxCommitInterval);
             
             if(vertexMode)
             {
