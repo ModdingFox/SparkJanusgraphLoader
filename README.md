@@ -1,6 +1,6 @@
 # SparkJanusgraphLoader
 
-So this may be a big heap of crap but it works. Currenlty only works with Janusgraph on Hbase with Solr. I didn't really need it to work for other graphs, backends, or indexing nor did I really want to test that, so didn't even bother including the other libs. The idea/need for me is something that can take orc files that each represent a type of vertex or edge from hdfs and shove it into a graph. Not a whole lot to it. I do plan on attempting to move the graph work off of the driver to the executors at some point.
+So this may be a big heap of crap but it works. Currently only works with Janusgraph on Hbase with Solr. I didn't really need it to work for other graphs, backends, or indexing nor did I really want to test that, so didn't even bother including the other libs. The idea/need for me is something that can take orc files that each represent a type of vertex or edge from hdfs and shove it into a graph. Not a whole lot to it. I do plan on attempting to move the graph work off of the driver to the executors at some point.
 
 --------------------------------------------------------------------------------------------------------------------------------
 #A quick how to use at least as it stands now. My env includes kerberos and the code assumes the env has it as well. Not to teriable to rip it out if needed.
