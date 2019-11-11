@@ -1,4 +1,3 @@
-import java.sql.Date;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.concurrent.ExecutionException;
@@ -68,7 +67,11 @@ public class graphCreate
     		case "StringType":
     			return String.class;
     		case "BooleanType":
-    			return Date.class;
+    			return Boolean.class;
+    		case "TimestampType":
+    			return java.util.Date.class;
+    		case "DateType":
+    			return java.util.Date.class;
     		default:
     			return null;
     	}
@@ -94,6 +97,10 @@ public class graphCreate
     			return DataTypes.StringType;
     		case "BooleanType":
     			return DataTypes.BooleanType;
+    		case "TimestampType":
+    			return DataTypes.TimestampType;
+    		case "DateType":
+    			return DataTypes.DateType;
     		default:
     			return null;
     	}
@@ -111,7 +118,8 @@ public class graphCreate
         else if(srcDataColumns.get(column)._2 == "DoubleType") { return currentRow.getDouble(column); }
         else if(srcDataColumns.get(column)._2 == "StringType") { return currentRow.getString(column); }
         else if(srcDataColumns.get(column)._2 == "BooleanType") { return currentRow.getBoolean(column); }
-        else if(srcDataColumns.get(column)._2 == "DateType") { return currentRow.getDate(column); }
+        else if(srcDataColumns.get(column)._2 == "TimestampType") { return new java.util.Date(currentRow.getTimestamp(column).getTime()); }
+        else if(srcDataColumns.get(column)._2 == "DateType") { return new java.util.Date(currentRow.getDate(column).getTime()); }
         else { log.info("Skipping column " + srcDataColumns.get(column)._1 + " with data type " + srcDataColumns.get(column)._2); return null; }	
     }
     
